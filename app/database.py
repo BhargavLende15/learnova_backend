@@ -13,6 +13,7 @@ roadmaps_collection: Any = None
 topic_notes_collection: Any = None
 gamification_collection: Any = None
 skillmap_collection: Any = None
+resources_collection: Any = None
 
 
 def mongo_enabled() -> bool:
@@ -36,7 +37,7 @@ def _db_name_from_uri(uri: str) -> str:
 
 def _ensure_client() -> None:
     global client, db, users_collection, assessments_collection, skills_db_collection, roadmaps_collection
-    global topic_notes_collection, gamification_collection, skillmap_collection
+    global topic_notes_collection, gamification_collection, skillmap_collection, resources_collection
     if not mongo_enabled():
         return
     if client is not None:
@@ -50,6 +51,7 @@ def _ensure_client() -> None:
     topic_notes_collection = db.topic_notes
     gamification_collection = db.gamification
     skillmap_collection = db.skill_map
+    resources_collection = db.resources
 
 
 async def get_database():
@@ -61,14 +63,20 @@ async def init_db():
     """Create Mongo indexes when MongoDB is configured."""
     if not mongo_enabled():
         return
-    _ensure_client()
-    await users_collection.create_index("email", unique=True)
-    await users_collection.create_index("user_id", unique=True)
-    await assessments_collection.create_index("user_id")
-    await roadmaps_collection.create_index("user_id")
-    await topic_notes_collection.create_index([("user_id", 1), ("topic_id", 1)], unique=True)
-    await gamification_collection.create_index("user_id", unique=True)
-    await skillmap_collection.create_index([("user_id", 1), ("topic_id", 1)], unique=True)
+    try:
+        _ensure_client()
+        await users_collection.create_index("email", unique=True)
+        await users_collection.create_index("user_id", unique=True)
+        await assessments_collection.create_index("user_id")
+        await roadmaps_collection.create_index("user_id")
+        await topic_notes_collection.create_index([("user_id", 1), ("topic_id", 1)], unique=True)
+        await gamification_collection.create_index("user_id", unique=True)
+        await skillmap_collection.create_index([("user_id", 1), ("topic_id", 1)], unique=True)
+        await resources_collection.create_index("topic", unique=True)
+        await resources_collection.create_index("createdAt")
+    except Exception:
+        # Mongo is optional. If it is configured but unavailable, keep the API up.
+        return
 
 
 async def mirror_roadmap_to_mongo(user_id: str, doc: dict) -> None:

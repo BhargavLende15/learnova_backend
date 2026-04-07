@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./learnova.db"
     MONGODB_URI: str = ""  # Optional: mirror roadmaps / question bank
     OPENAI_API_KEY: str = ""
+    YOUTUBE_API_KEY: str = ""
     JWT_SECRET: str = "learnova-dev-secret-change-in-production"
     DEBUG: bool = True
 

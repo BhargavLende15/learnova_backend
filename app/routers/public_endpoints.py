@@ -8,7 +8,6 @@ from app.db_sql import get_db
 from app.database import mirror_roadmap_to_mongo
 from app.services.progress_agent import apply_progress_update
 from app.sql_models import RoadmapRow
-from app.services.links import generate_practice_links, generate_resource_links
 from app.routers.practice_session import save_notes, get_notes  # re-export behavior
 from app.routers.skill_map import get_skill_map_data
 from app.routers.gamification import update_gamification, get_gamification
@@ -53,21 +52,6 @@ async def update_progress(data: ProgressUpdate, session: AsyncSession = Depends(
 @router.post("/unlock-next-topic")
 async def unlock_next_topic(data: ProgressUpdate, session: AsyncSession = Depends(get_db)):
     return await update_progress(data, session)
-
-
-class GenerateBody(BaseModel):
-    topic_name: str
-
-
-@router.post("/generate-resources")
-async def generate_resources(body: GenerateBody):
-    links = generate_resource_links(body.topic_name)
-    return {"topic_name": body.topic_name, "reading": links.reading, "videos": links.videos}
-
-
-@router.post("/generate-practice-links")
-async def generate_practice(body: GenerateBody):
-    return {"topic_name": body.topic_name, "practice": generate_practice_links(body.topic_name)}
 
 
 # Notes / skill map / gamification are provided by their dedicated routers,

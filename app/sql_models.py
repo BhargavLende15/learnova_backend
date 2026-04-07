@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models — PostgreSQL (or SQLite for local demo)."""
 from datetime import datetime
-from sqlalchemy import String, Text, Boolean, DateTime, JSON, func
+from sqlalchemy import String, Text, Boolean, DateTime, JSON, func, Integer
 from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
 
 
@@ -15,6 +15,10 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255))
     hashed_password: Mapped[str] = mapped_column(String(255))
+    points: Mapped[int] = mapped_column(Integer, default=0)
+    streak: Mapped[int] = mapped_column(Integer, default=0)
+    last_active_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_topics: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
