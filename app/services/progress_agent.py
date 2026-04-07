@@ -86,6 +86,20 @@ def apply_progress_update(
             w = ph.get("timeline_weeks", 4)
             ph["timeline_weeks"] = max(2, int(w * 0.9))
 
+    # Hierarchical unlocking (linear by phase/topic order)
+    ordered_topic_ids: List[str] = []
+    for ph in phases:
+        for t in ph.get("topics", []):
+            tid = t.get("id")
+            if tid:
+                ordered_topic_ids.append(tid)
+    unlocked: Set[str] = set(done_set)
+    for tid in ordered_topic_ids:
+        if tid not in done_set:
+            unlocked.add(tid)
+            break
+    progress["unlocked_topic_ids"] = list(unlocked)
+
     data["phases"] = phases
     data["progress"] = progress
     return data

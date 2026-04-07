@@ -10,6 +10,9 @@ users_collection: Any = None
 assessments_collection: Any = None
 skills_db_collection: Any = None
 roadmaps_collection: Any = None
+topic_notes_collection: Any = None
+gamification_collection: Any = None
+skillmap_collection: Any = None
 
 
 def mongo_enabled() -> bool:
@@ -33,6 +36,7 @@ def _db_name_from_uri(uri: str) -> str:
 
 def _ensure_client() -> None:
     global client, db, users_collection, assessments_collection, skills_db_collection, roadmaps_collection
+    global topic_notes_collection, gamification_collection, skillmap_collection
     if not mongo_enabled():
         return
     if client is not None:
@@ -43,6 +47,9 @@ def _ensure_client() -> None:
     assessments_collection = db.assessments
     skills_db_collection = db.skills_database
     roadmaps_collection = db.roadmaps
+    topic_notes_collection = db.topic_notes
+    gamification_collection = db.gamification
+    skillmap_collection = db.skill_map
 
 
 async def get_database():
@@ -59,6 +66,9 @@ async def init_db():
     await users_collection.create_index("user_id", unique=True)
     await assessments_collection.create_index("user_id")
     await roadmaps_collection.create_index("user_id")
+    await topic_notes_collection.create_index([("user_id", 1), ("topic_id", 1)], unique=True)
+    await gamification_collection.create_index("user_id", unique=True)
+    await skillmap_collection.create_index([("user_id", 1), ("topic_id", 1)], unique=True)
 
 
 async def mirror_roadmap_to_mongo(user_id: str, doc: dict) -> None:

@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
 from app.db_sql import init_sql_db
 from app.routers import auth, assessment, roadmap, progress, mentor, catalog, user_prefs
+from app.routers.public_endpoints import router as public_router
 from app.seed_skills import seed_skills
 
 
@@ -43,6 +44,7 @@ app.include_router(assessment.router)
 app.include_router(roadmap.router)
 app.include_router(progress.router)
 app.include_router(mentor.router)
+app.include_router(public_router)
 
 
 @app.get("/")

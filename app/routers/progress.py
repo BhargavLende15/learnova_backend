@@ -52,3 +52,18 @@ async def update_progress(data: ProgressUpdate, session: AsyncSession = Depends(
         "roadmap_updated": True,
         "roadmap": new_payload,
     }
+
+
+@router.post("/unlock-next-topic")
+async def unlock_next_topic(data: ProgressUpdate, session: AsyncSession = Depends(get_db)):
+    """
+    Compatibility endpoint for UI flows that call "unlock-next-topic" explicitly.
+    Unlocking is computed as part of the roadmap payload update.
+    """
+    return await update_progress(data, session)
+
+
+@router.post("/update-progress")
+async def update_progress_alias(data: ProgressUpdate, session: AsyncSession = Depends(get_db)):
+    """Compatibility alias for the requested `/update-progress` endpoint."""
+    return await update_progress(data, session)
