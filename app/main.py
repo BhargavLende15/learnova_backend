@@ -1,30 +1,30 @@
-"""Learnova - Career Roadmap AI System - FastAPI Backend."""
+"""Learnova — adaptive assessment, roadmap, and progress (FastAPI)."""
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import get_settings
 from app.database import init_db
-from app.routers import auth, assessment, roadmap, progress, mentor
+from app.db_sql import init_sql_db
+from app.routers import auth, assessment, roadmap, progress, mentor, catalog, user_prefs
 from app.seed_skills import seed_skills
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init DB and seed skills."""
+    await init_sql_db()
     await init_db()
     try:
         await seed_skills()
     except Exception:
-        pass  # Continue if seed fails (e.g. already seeded)
+        pass
     yield
-    # Shutdown if needed
 
 
 app = FastAPI(
     title="Learnova API",
-    description="Career Roadmap AI - Skill Gap Analysis, Roadmap Generator, AI Mentor",
-    version="1.0.0",
+    description="Adaptive learning: goal/skills, assessment agent, roadmap agent, progress agent",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -37,6 +37,8 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(catalog.router)
+app.include_router(user_prefs.router)
 app.include_router(assessment.router)
 app.include_router(roadmap.router)
 app.include_router(progress.router)
@@ -47,15 +49,7 @@ app.include_router(mentor.router)
 async def root():
     return {
         "name": "Learnova",
-        "description": "Career Roadmap AI System",
+        "version": "2.0.0",
         "docs": "/docs",
-        "endpoints": {
-            "register": "POST /auth/register",
-            "login": "POST /auth/login",
-            "questions": "GET /assessment/questions/{goal}",
-            "submit_assessment": "POST /assessment/submit",
-            "roadmap": "GET /roadmap/{user_id}",
-            "progress": "POST /progress/update",
-            "mentor": "POST /mentor/chat",
-        },
+        "flow": "Login → POST /user/goal-skills → POST /assessment/start → /assessment/answer → /assessment/finalize → POST /roadmap/generate/{user_id} → GET /roadmap/{user_id} → POST /progress/update",
     }

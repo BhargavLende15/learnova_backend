@@ -77,13 +77,15 @@ ASSESSMENT_QUESTIONS: Dict[str, List[Dict]] = {
 
 
 def get_questions_for_goal(goal: str) -> List[Dict]:
-    """Get assessment questions based on career goal."""
-    goal_skill_map = {
-        "Data Scientist": ["Python", "Statistics", "Machine Learning", "SQL"],
-        "Web Developer": ["HTML", "CSS", "JavaScript", "React", "Node.js"],
-        "AI Engineer": ["Python", "Machine Learning", "Deep Learning", "SQL"],
-    }
-    skills = goal_skill_map.get(goal, ["Python", "Statistics", "Machine Learning"])
+    """Get assessment questions based on career goal (all default skills for role)."""
+    from app.catalog_data import SKILLS_BY_GOAL
+
+    skills = SKILLS_BY_GOAL.get(goal, ["Python", "Statistics", "Machine Learning"])
+    return get_questions_for_skills(skills)
+
+
+def get_questions_for_skills(skills: List[str]) -> List[Dict]:
+    """Flatten question bank for selected skills."""
     questions = []
     for skill in skills:
         if skill in ASSESSMENT_QUESTIONS:

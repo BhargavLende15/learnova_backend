@@ -5,7 +5,9 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     """Application settings from environment variables."""
-    MONGODB_URI: str = "mongodb://localhost:27017/learnova"
+    # SQLite by default for zero-config demo; set postgresql+asyncpg://... for PostgreSQL
+    DATABASE_URL: str = "sqlite+aiosqlite:///./learnova.db"
+    MONGODB_URI: str = ""  # Optional: mirror roadmaps / question bank
     OPENAI_API_KEY: str = ""
     JWT_SECRET: str = "learnova-dev-secret-change-in-production"
     DEBUG: bool = True

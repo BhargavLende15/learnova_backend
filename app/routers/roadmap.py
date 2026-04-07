@@ -1,75 +1,59 @@
-"""Roadmap routes: Generate and fetch roadmap."""
-from fastapi import APIRouter, HTTPException
-from app.database import users_collection, assessments_collection, roadmaps_collection
-from app.services.skill_gap import get_industry_skills, compute_skill_gap
-from app.services.roadmap_generator import generate_roadmap
-from app.services.agents import run_agentic_workflow
+"""Roadmap generation and fetch — Roadmap Agent + PostgreSQL (+ optional Mongo mirror)."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import mirror_roadmap_to_mongo
+from app.db_sql import get_db
+from app.services.roadmap_agent import build_roadmap_payload
+from app.sql_models import AssessmentResultRow, RoadmapRow, UserGoalSkills
 
 router = APIRouter(prefix="/roadmap", tags=["roadmap"])
 
 
+@router.post("/generate/{user_id}")
+async def generate_roadmap(user_id: str, session: AsyncSession = Depends(get_db)):
+    pref = await session.get(UserGoalSkills, user_id)
+    if not pref:
+        raise HTTPException(status_code=400, detail="Save career goal and skills first")
+
+    r = await session.execute(
+        select(AssessmentResultRow)
+        .where(AssessmentResultRow.user_id == user_id)
+        .order_by(AssessmentResultRow.created_at.desc())
+        .limit(1)
+    )
+    res = r.scalar_one_or_none()
+    if not res:
+        raise HTTPException(status_code=400, detail="Complete and finalize the assessment first")
+
+    skill_levels = res.skill_levels
+    payload = build_roadmap_payload(pref.career_goal, skill_levels)
+
+    row = await session.get(RoadmapRow, user_id)
+    if row:
+        row.career_goal = pref.career_goal
+        row.payload = payload
+    else:
+        session.add(RoadmapRow(user_id=user_id, career_goal=pref.career_goal, payload=payload))
+    await session.commit()
+
+    await mirror_roadmap_to_mongo(
+        user_id,
+        {
+            "user_id": user_id,
+            "goal": pref.career_goal,
+            "roadmap_payload": payload,
+            "skills_gap": list(skill_levels.keys()),
+        },
+    )
+
+    return {"user_id": user_id, "roadmap": payload}
+
+
 @router.get("/{user_id}")
-async def get_roadmap(user_id: str):
-    """Generate or retrieve roadmap for user (with Agentic AI + Explainable AI)."""
-    user = await users_collection.find_one({"user_id": user_id})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    goal = user.get("goal", "Data Scientist")
-    current_level = user.get("current_level", "Beginner")
-
-    # Get latest assessment
-    assessment = await assessments_collection.find_one(
-        {"user_id": user_id},
-        sort=[("_id", -1)]
-    )
-    if not assessment:
-        raise HTTPException(
-            status_code=400,
-            detail="Complete the diagnostic assessment first"
-        )
-
-    scores = {s["skill"]: s["score"] for s in assessment.get("scores", [])}
-    industry_skills = await get_industry_skills(goal)
-    skills_gap = compute_skill_gap(industry_skills, scores)
-
-    # Run Agentic AI workflow (optional - adds explanation)
-    agent_result = await run_agentic_workflow(
-        user_id, goal, scores, industry_skills
-    )
-    gap_list = agent_result.get("gap_list", skills_gap)
-
-    # Generate roadmap with explainable AI
-    milestones, explanation = generate_roadmap(
-        gap_list, scores, goal, current_level
-    )
-
-    # Check for existing roadmap and progress
-    existing = await roadmaps_collection.find_one({"user_id": user_id})
-    progress = existing.get("progress", {}) if existing else {}
-
-    roadmap_doc = {
-        "user_id": user_id,
-        "goal": goal,
-        "skills_gap": gap_list,
-        "current_level": current_level,
-        "roadmap": [m.model_dump() for m in milestones],
-        "progress": progress,
-        "explanation": explanation,
-    }
-    await roadmaps_collection.update_one(
-        {"user_id": user_id},
-        {"$set": roadmap_doc},
-        upsert=True
-    )
-
-    return {
-        "user_id": user_id,
-        "goal": goal,
-        "current_level": current_level,
-        "skills_gap": gap_list,
-        "roadmap": [{"month": m.month, "skill": m.skill, "reason": m.reason} for m in milestones],
-        "progress": progress,
-        "explanation": explanation,
-        "agent_analysis": agent_result.get("skill_analysis"),
-    }
+async def get_roadmap(user_id: str, session: AsyncSession = Depends(get_db)):
+    row = await session.get(RoadmapRow, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Roadmap not found — call POST /roadmap/generate/{user_id}")
+    return {"user_id": user_id, "career_goal": row.career_goal, "roadmap": row.payload}
