@@ -5,11 +5,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.database import (
-    mongo_enabled,
-    _ensure_client,  # type: ignore
-    topic_notes_collection,
-)
+from app.database import mongo_enabled, _ensure_client
+from app import database as db
 from app.services.links import generate_practice_links, generate_resource_links
 
 
@@ -44,7 +41,7 @@ async def save_notes(body: SaveNotesBody):
         raise HTTPException(status_code=400, detail="MongoDB is not enabled")
     _ensure_client()
     now = datetime.now(timezone.utc).isoformat()
-    await topic_notes_collection.update_one(
+    await db.topic_notes_collection.update_one(
         {"user_id": body.userId, "topic_id": body.topicId},
         {"$set": {"notes": body.notes, "updated_at": now}, "$setOnInsert": {"created_at": now}},
         upsert=True,
@@ -57,6 +54,6 @@ async def get_notes(userId: str, topicId: str):
     if not mongo_enabled():
         return {"userId": userId, "topicId": topicId, "notes": ""}
     _ensure_client()
-    doc = await topic_notes_collection.find_one({"user_id": userId, "topic_id": topicId})
+    doc = await db.topic_notes_collection.find_one({"user_id": userId, "topic_id": topicId})
     return {"userId": userId, "topicId": topicId, "notes": (doc or {}).get("notes", "")}
 

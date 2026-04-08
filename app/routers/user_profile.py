@@ -10,6 +10,7 @@ from app.db_sql import get_db
 from app.database import mirror_roadmap_to_mongo
 from app.services.progress_agent import apply_progress_update
 from app.sql_models import RoadmapRow, User
+from app.deps import get_current_user
 
 
 router = APIRouter(prefix="/api", tags=["profile"])
@@ -28,7 +29,13 @@ class DailyLoginBody(BaseModel):
 
 
 @router.post("/daily-login")
-async def daily_login(body: DailyLoginBody, session: AsyncSession = Depends(get_db)):
+async def daily_login(
+    body: DailyLoginBody,
+    session: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    if body.userId != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Forbidden")
     user = await session.get(User, body.userId)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -64,7 +71,13 @@ class CompleteTopicBody(BaseModel):
 
 
 @router.post("/complete-topic")
-async def complete_topic(body: CompleteTopicBody, session: AsyncSession = Depends(get_db)):
+async def complete_topic(
+    body: CompleteTopicBody,
+    session: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    if body.userId != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Forbidden")
     user = await session.get(User, body.userId)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -97,7 +110,13 @@ async def complete_topic(body: CompleteTopicBody, session: AsyncSession = Depend
 
 
 @router.get("/profile/{user_id}")
-async def get_profile(user_id: str, session: AsyncSession = Depends(get_db)):
+async def get_profile(
+    user_id: str,
+    session: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    if user_id != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Forbidden")
     user = await session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

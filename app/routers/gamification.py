@@ -5,7 +5,8 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.database import gamification_collection, mongo_enabled, _ensure_client  # type: ignore
+from app.database import mongo_enabled, _ensure_client
+from app import database as db
 
 
 router = APIRouter(tags=["gamification"])
@@ -54,7 +55,7 @@ async def update_gamification(body: UpdateGamificationBody):
     _ensure_client()
 
     today = _utc_today()
-    existing = await gamification_collection.find_one({"user_id": body.userId}) or {}
+    existing = await db.gamification_collection.find_one({"user_id": body.userId}) or {}
 
     points = int(existing.get("points") or 0)
     streak = int(existing.get("streakCount") or 0)
@@ -81,7 +82,7 @@ async def update_gamification(body: UpdateGamificationBody):
         "lastActiveDate": today.isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    await gamification_collection.update_one({"user_id": body.userId}, {"$set": doc}, upsert=True)
+    await db.gamification_collection.update_one({"user_id": body.userId}, {"$set": doc}, upsert=True)
     return {"ok": True, **doc}
 
 
@@ -90,7 +91,7 @@ async def get_gamification(userId: str):
     if not mongo_enabled():
         return {"userId": userId, "points": 0, "badges": ["Beginner"], "streakCount": 0, "lastActiveDate": None}
     _ensure_client()
-    doc = await gamification_collection.find_one({"user_id": userId}) or {}
+    doc = await db.gamification_collection.find_one({"user_id": userId}) or {}
     return {
         "userId": userId,
         "points": int(doc.get("points") or 0),

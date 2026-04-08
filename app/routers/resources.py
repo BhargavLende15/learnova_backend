@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.config import get_settings
 from app.database import mongo_enabled, resources_collection, _ensure_client  # type: ignore
+from app.deps import get_current_user
 
 
 router = APIRouter(prefix="/api", tags=["resources"])
@@ -144,7 +145,7 @@ async def _gfg_best_link(topic: str) -> str:
 
 
 @router.get("/resources")
-async def get_resources(topic: str = Query(min_length=1, max_length=200)):
+async def get_resources(topic: str = Query(min_length=1, max_length=200), _: dict = Depends(get_current_user)):
     norm = _norm_topic(topic)
     # Mongo is optional: if unavailable, we still fetch live (no caching).
     if mongo_enabled():

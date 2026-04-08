@@ -65,6 +65,7 @@ async def init_db():
         return
     try:
         _ensure_client()
+        print("MongoDB Connected")
         await users_collection.create_index("email", unique=True)
         await users_collection.create_index("user_id", unique=True)
         await assessments_collection.create_index("user_id")
@@ -86,5 +87,54 @@ async def mirror_roadmap_to_mongo(user_id: str, doc: dict) -> None:
     await roadmaps_collection.update_one(
         {"user_id": user_id},
         {"$set": doc},
+        upsert=True,
+    )
+
+async def init_skillmap_in_mongo(user_id: str, payload: dict, skill_levels: dict) -> None:
+    if not mongo_enabled():
+        return
+    _ensure_client()
+    for ph in payload.get("phases", []):
+        for t in ph.get("topics", []):
+            sk = t.get("skill")
+            if not sk:
+                continue
+            lvl_info = skill_levels.get(sk, {})
+            accuracy = float(lvl_info.get("score", 0.0))
+            mastery = "Strong" if accuracy >= 80 else ("متوسط" if accuracy >= 50 else "Weak")
+            await skillmap_collection.update_one(
+                {"user_id": user_id, "topic_id": t["id"]},
+                {"$set": {
+                    "user_id": user_id,
+                    "topic_id": t["id"],
+                    "accuracyPct": accuracy,
+                    "attempts": 1,
+                    "masteryLevel": mastery
+                }},
+                upsert=True,
+            )
+
+async def update_skillmap_in_mongo(user_id: str, topic_id: str, completed: bool, perf_score: float | None) -> None:
+    if not mongo_enabled():
+        return
+    _ensure_client()
+    doc = await skillmap_collection.find_one({"user_id": user_id, "topic_id": topic_id}) or {}
+    attempts = doc.get("attempts", 0)
+    current_acc = doc.get("accuracyPct", 0.0)
+    if completed:
+        attempts += 1
+        
+    new_acc = float(perf_score) if perf_score is not None else (100.0 if completed else current_acc)
+    mastery = "Strong" if new_acc >= 80 else ("متوسط" if new_acc >= 50 else "Weak")
+    
+    await skillmap_collection.update_one(
+        {"user_id": user_id, "topic_id": topic_id},
+        {"$set": {
+            "user_id": user_id,
+            "topic_id": topic_id,
+            "accuracyPct": new_acc,
+            "attempts": attempts,
+            "masteryLevel": mastery
+        }},
         upsert=True,
     )
