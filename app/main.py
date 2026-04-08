@@ -9,6 +9,7 @@ from app.db_sql import init_sql_db
 from app.routers import auth, assessment, roadmap, progress, mentor, catalog, user_prefs
 from app.routers.resources import router as resources_router
 from app.routers.user_profile import router as profile_router
+from app.routers.api_auth import router as api_auth_router
 from app.routers.public_endpoints import router as public_router
 from app.seed_skills import seed_skills
 
@@ -49,6 +50,7 @@ app.include_router(mentor.router)
 app.include_router(public_router)
 app.include_router(resources_router)
 app.include_router(profile_router)
+app.include_router(api_auth_router)
 
 
 @app.get("/")

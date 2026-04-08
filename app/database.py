@@ -65,6 +65,7 @@ async def init_db():
         return
     try:
         _ensure_client()
+        print("MongoDB Connected")
         await users_collection.create_index("email", unique=True)
         await users_collection.create_index("user_id", unique=True)
         await assessments_collection.create_index("user_id")
