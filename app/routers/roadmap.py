@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import mirror_roadmap_to_mongo
+from app.database import mirror_roadmap_to_mongo, init_skillmap_in_mongo
 from app.db_sql import get_db
 from app.services.roadmap_agent import build_roadmap_payload
 from app.sql_models import AssessmentResultRow, RoadmapRow, UserGoalSkills
@@ -47,6 +47,8 @@ async def generate_roadmap(user_id: str, session: AsyncSession = Depends(get_db)
             "skills_gap": list(skill_levels.keys()),
         },
     )
+    
+    await init_skillmap_in_mongo(user_id, payload, skill_levels)
 
     return {"user_id": user_id, "roadmap": payload}
 

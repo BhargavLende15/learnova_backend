@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import mirror_roadmap_to_mongo
+from app.database import mirror_roadmap_to_mongo, update_skillmap_in_mongo
 from app.db_sql import get_db
 from app.services.progress_agent import apply_progress_update
 from app.sql_models import RoadmapRow
@@ -46,6 +46,9 @@ async def update_progress(data: ProgressUpdate, session: AsyncSession = Depends(
             "roadmap_payload": new_payload,
         },
     )
+    
+    if data.item_type == "topic":
+        await update_skillmap_in_mongo(data.user_id, data.item_id, data.completed, data.performance_score)
 
     return {
         "user_id": data.user_id,

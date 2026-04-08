@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db_sql import get_db
 from app.sql_models import RoadmapRow
-from app.database import mongo_enabled, _ensure_client, skillmap_collection  # type: ignore
+from app.database import mongo_enabled, _ensure_client
+from app import database as db
 
 
 router = APIRouter(tags=["skill-map"])
@@ -66,7 +67,7 @@ async def get_skill_map_data(body: SkillMapRequest, session: AsyncSession = Depe
     if mongo_enabled():
         _ensure_client()
         extra = {}
-        async for d in skillmap_collection.find({"user_id": body.userId}, {"_id": 0}):
+        async for d in db.skillmap_collection.find({"user_id": body.userId}, {"_id": 0}):
             extra[d.get("topic_id")] = d
         for it in topics:
             e = extra.get(it["topicId"])
