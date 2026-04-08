@@ -1,6 +1,6 @@
 """Seed MongoDB skills database when MongoDB is enabled."""
 import asyncio
-from app.database import init_db, mongo_enabled, skills_db_collection
+from app import database as db
 
 SKILLS_DATA = [
     {
@@ -22,12 +22,12 @@ SKILLS_DATA = [
 
 
 async def seed_skills():
-    await init_db()
-    if not mongo_enabled() or skills_db_collection is None:
+    await db.init_db()
+    if not db.mongo_enabled() or db.skills_db_collection is None:
         print("MongoDB disabled — using built-in catalog (catalog_data.py).")
         return
     for role_data in SKILLS_DATA:
-        await skills_db_collection.update_one(
+        await db.skills_db_collection.update_one(
             {"role": role_data["role"]},
             {"$set": role_data},
             upsert=True,
