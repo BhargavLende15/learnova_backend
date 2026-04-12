@@ -1,19 +1,20 @@
 """
 Agentic AI Layer - Skill Analyzer, Industry Expert, Roadmap Agent, Mentor Agent.
-Uses LangChain with OpenAI. Falls back to rule-based logic if no API key.
+Mentor chat uses the OpenAI API when OPENAI_API_KEY is set; otherwise rule-based fallback.
 """
 import json
+import logging
+import os
 import re
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from app.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 settings = get_settings()
-
-import os
-os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY  
-
-HAS_OPENAI = bool(settings.OPENAI_API_KEY)
+if settings.OPENAI_API_KEY:
+    os.environ.setdefault("OPENAI_API_KEY", settings.OPENAI_API_KEY)
 
 
 # ---------- Tool Functions (used by agents) ----------
@@ -50,110 +51,93 @@ def _mentor_context_block(ctx: dict) -> str:
         "selected_skills": ctx.get("selected_skills", []),
         "assessment_levels": ctx.get("assessment_levels", {}),
         "roadmap_phases": ctx.get("roadmap_phases", []),
+        "roadmap_progress": ctx.get("roadmap_progress", {}),
         "completed_topics_count": len(ctx.get("completed_topic_ids") or []),
     }
     raw = json.dumps(slim, ensure_ascii=False, default=str)
     return raw[:14_000]
 
 
-async def mentor_chat(user_id: str, message: str, context: Optional[dict] = None) -> str:
-    """
-    Contextual coach: roadmap rationale, next steps, quiz help, careers, motivation.
-    """
-    ctx = context or {}
-    if not HAS_OPENAI:
-        return _rule_based_mentor(message, ctx)
+def _mentor_system_message(ctx: dict) -> str:
+    return f"""You are Learnova Coach, a senior mentor for a personalized learning platform.
 
-    ctx = context or {}
-
-    # ---------- 1️⃣ OpenAI ----------
-    if HAS_OPENAI:
-        try:
-            from langchain_openai import ChatOpenAI
-            from langchain_core.messages import HumanMessage, SystemMessage
-
-            llm = ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=0.7,
-                api_key=settings.OPENAI_API_KEY
-            )
-
-            sys = """You are an AI career mentor for Learnova.
-            Give clear, practical, step-by-step advice."""
-
-            msgs = [
-                SystemMessage(content=sys + f"\nUser context: {ctx}"),
-                HumanMessage(content=message),
-            ]
-
-            resp = await llm.ainvoke(msgs)
-            return resp.content
-
-        except Exception:
-            pass  # fallback to Groq
-
-    # ---------- 2️⃣ Groq (FREE) ----------
-    try:
-        from langchain_openai import ChatOpenAI
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.75)
-        sys = f"""You are Learnova Coach, a senior mentor for a personalized AI learning platform.
-
-Use the JSON user context as ground truth. Personalize every answer; do not give generic platitudes.
+Use the JSON user context as ground truth. Personalize every answer; avoid vague generic advice.
 
 You help with:
 - Why this roadmap or skill order fits their goal
 - What to learn next and how to start today
 - Explaining roadmap phases or weekly focus
-- Career guidance for Data Scientist, Web Developer, AI Engineer paths
-- Clearing up quiz/assessment doubts (explain concepts, never leak hidden answers)
+- Career guidance tied to their stated goal and skills
+- Clearing up quiz/assessment doubts (explain concepts; never reveal correct answers or hidden solutions)
 - Technology explanations in plain language
 - Motivation without sounding repetitive
 
 Rules:
 - Reference specific skills, levels, or phase names from context when relevant.
-- If context is empty, say what is missing (e.g. save goal/skills, finish assessment) and still give a useful general tip.
-- Keep answers scannable: short paragraphs or bullets, under ~220 words unless the user asks for depth.
-- Never fabricate assessment scores; if missing, acknowledge it.
+- If context is thin, say what is missing (e.g. save goal/skills, finish assessment) and still give one useful next step.
+- Keep answers scannable: short paragraphs or bullets, under ~280 words unless the user asks for depth.
+- Never fabricate assessment scores or roadmap content; if missing, say so.
 
 USER CONTEXT (JSON):
 {_mentor_context_block(ctx)}
 """
 
-        msgs = [
-            SystemMessage(content=sys),
-            HumanMessage(content=message.strip()),
-        ]
-        resp = await llm.ainvoke(msgs)
-        return (resp.content or "").strip()
-    except Exception as e:
-        return _rule_based_mentor(message, ctx) + f"\n\n(Live AI briefly unavailable — {e})"
 
-        prompt = f"""
-        You are an AI career mentor.
+def _sanitize_history(history: Optional[List[dict[str, str]]], limit: int = 24) -> List[dict[str, str]]:
+    if not history:
+        return []
+    out: List[dict[str, str]] = []
+    for turn in history[-limit:]:
+        role = (turn.get("role") or "").strip().lower()
+        content = (turn.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        out.append({"role": role, "content": content[:12_000]})
+    return out
 
-        Goal: {ctx.get("goal")}
-        Skills: {ctx.get("skills")}
-        Gaps: {ctx.get("gap")}
 
-        Question: {message}
+async def mentor_chat(
+    user_id: str,
+    message: str,
+    context: Optional[dict] = None,
+    history: Optional[List[dict[str, str]]] = None,
+) -> str:
+    """
+    Contextual coach: roadmap rationale, next steps, quiz help, careers, motivation.
+    Uses OpenAI when configured; otherwise rule-based fallback.
+    """
+    ctx = context or {}
+    text = (message or "").strip()
+    if not text:
+        return "Ask me anything about your roadmap, skills, or next steps."
 
-        Give short, actionable guidance.
-        """
+    s = get_settings()
+    if not (s.OPENAI_API_KEY or "").strip():
+        return _rule_based_mentor(text, ctx)
 
-        chat_completion = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama3-8b-8192",
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=s.OPENAI_API_KEY)
+        system = _mentor_system_message(ctx)
+        msgs: List[dict[str, str]] = [{"role": "system", "content": system}]
+        for h in _sanitize_history(history):
+            msgs.append(h)
+        msgs.append({"role": "user", "content": text[:12_000]})
+
+        comp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.65,
+            max_tokens=900,
+            messages=msgs,
         )
+        reply = (comp.choices[0].message.content or "").strip()
+        if reply:
+            return reply
+    except Exception as exc:
+        logger.warning("Mentor OpenAI chat failed, using rule-based fallback: %s", exc)
 
-        return chat_completion.choices[0].message.content
-
-    except Exception:
-        pass
-
-    # ---------- 3️⃣ Rule-based ----------
-    return _rule_based_mentor(message, ctx)
+    return _rule_based_mentor(text, ctx)
 
 def _rule_based_mentor(message: str, context: dict) -> str:
     """Structured fallback when OpenAI is unavailable."""
@@ -259,9 +243,6 @@ def _rule_based_mentor(message: str, context: dict) -> str:
         "I can explain your roadmap, suggest what to study next, estimate timelines, or unpack technologies. "
         f"Your saved goal is **{goal or 'not set yet'}**. What would you like to dig into?"
     )
-
-    # 🔹 Default (improved ❗)
-    return f"For your goal '{goal}', focus on improving weak skills like {', '.join(gap[:2]) if gap else 'advanced topics'} and keep practicing."
 
 # ---------- Agentic Workflow (orchestrator) ----------
 async def run_agentic_workflow(
