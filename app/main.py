@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
 from app.db_sql import init_sql_db
 from app.routers import auth, assessment, roadmap, progress, mentor, catalog, user_prefs, skill_map
+from app.routers.practice_session import router as practice_router
 from app.routers.resources import router as resources_router
 from app.routers.user_profile import router as profile_router
 from app.routers.api_auth import router as api_auth_router
@@ -52,6 +53,7 @@ app.include_router(resources_router)
 app.include_router(profile_router)
 app.include_router(api_auth_router)
 app.include_router(skill_map.router)
+app.include_router(practice_router)
 
 
 @app.get("/")

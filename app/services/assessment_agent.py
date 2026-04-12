@@ -1,17 +1,16 @@
 """
 Assessment Agent — adaptive difficulty, per-skill tracking, session state.
-Correct → harder tier; wrong → easier tier. MCQ options without exposing correct flag.
+Questions are generated dynamically (LLM + procedural fallback), not from a static DB bank.
 """
 from __future__ import annotations
 
 import asyncio
-import random
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.assessment_questions import ASSESSMENT_QUESTIONS
 from app.models import SkillLevel
+from app.services.question_generator import generate_assessment_question, public_question_view
 from difflib import SequenceMatcher
 
 
@@ -29,44 +28,6 @@ def score_to_level(score: float) -> SkillLevel:
     if score < 70:
         return SkillLevel.INTERMEDIATE
     return SkillLevel.ADVANCED
-
-
-# Generic distractors for MCQ (demo)
-_DISTRACTORS = [
-    "A concept unrelated to the question",
-    "An outdated or incorrect definition",
-    "A partial truth that misses the core idea",
-    "A common misconception in interviews",
-]
-
-
-def build_mcq_options(correct_answer: str, seed: int) -> List[str]:
-    rng = random.Random(seed)
-    pool = [d for d in _DISTRACTORS if d.lower() != correct_answer.lower()][:3]
-    while len(pool) < 3:
-        pool.append(_DISTRACTORS[len(pool) % len(_DISTRACTORS)])
-    opts = [correct_answer] + pool[:3]
-    rng.shuffle(opts)
-    return opts
-
-
-def _questions_by_difficulty(skill: str) -> Dict[int, List[dict]]:
-    """Map difficulty 1..3 to question dicts (by index buckets)."""
-    qs = ASSESSMENT_QUESTIONS.get(skill, [])
-    if not qs:
-        return {1: [], 2: [], 3: []}
-    n = len(qs)
-    buckets: Dict[int, List[dict]] = {1: [], 2: [], 3: []}
-    for i, q in enumerate(qs):
-        tier = min(3, (i * 3 // max(n, 1)) + 1)
-        if tier < 1:
-            tier = 1
-        qcopy = {**q, "skill": skill, "difficulty": tier}
-        buckets[tier].append(qcopy)
-    for t in (1, 2, 3):
-        if not buckets[t] and qs:
-            buckets[t].append({**qs[0], "skill": skill, "difficulty": t})
-    return buckets
 
 
 @dataclass
@@ -103,12 +64,20 @@ class AssessmentAgent:
         self._sessions: Dict[str, SessionState] = {}
         self._lock = asyncio.Lock()
 
+    def _avoid_stems(self, st: SessionState) -> List[str]:
+        stems: List[str] = []
+        for h in st.history:
+            stem = h.get("stem")
+            if isinstance(stem, str) and stem.strip():
+                stems.append(stem.strip())
+        return stems
+
     async def start_session(self, user_id: str, skills: List[str]) -> Tuple[SessionState, dict]:
         sid = str(uuid.uuid4())
         st = SessionState(session_id=sid, user_id=user_id, skills=list(skills))
         async with self._lock:
             self._sessions[sid] = st
-        q_payload = self._next_question_payload(st)
+        q_payload = await self._next_question_payload_async(st)
         return st, q_payload
 
     def _pick_skill(self, st: SessionState) -> str:
@@ -118,50 +87,60 @@ class AssessmentAgent:
         st.skill_ptr += 1
         return s
 
-    def _next_question_payload(self, st: SessionState) -> dict:
+    async def _next_question_payload_async(self, st: SessionState) -> dict:
         if st.questions_answered >= st.max_questions or not st.skills:
-            return {"done": True, "message": "Answer budget reached — finalize assessment."}
+            return {"done": True, "message": "You have reached the question limit — finalize to save your skill profile."}
 
-        for _ in range(len(st.skills) * 4):
+        avoid = self._avoid_stems(st)
+
+        for _attempt in range(len(st.skills) * 5):
             skill = self._pick_skill(st)
             ps = st.per_skill[skill]
             tier = max(1, min(3, ps.difficulty))
-            buckets = _questions_by_difficulty(skill)
-            pool = buckets.get(tier, [])
-            unused = [q for q in pool if q["question_id"] not in ps.used_ids]
-            if not unused:
-                for t in (1, 2, 3):
-                    pool2 = [q for q in buckets.get(t, []) if q["question_id"] not in ps.used_ids]
-                    if pool2:
-                        unused = pool2
-                        break
-            if not unused:
-                continue
 
-            q = random.choice(unused)
-            ps.used_ids.append(q["question_id"])
-            seed = hash(q["question_id"] + st.session_id) % (2**31)
-            options = build_mcq_options(q["correct_answer"], seed)
+            q_full = await generate_assessment_question(
+                skill=skill,
+                tier=tier,
+                session_id=st.session_id,
+                user_id=st.user_id,
+                questions_answered=st.questions_answered,
+                max_questions=st.max_questions,
+                avoid_stems=avoid,
+            )
+
+            qid = q_full["question_id"]
+            if qid in ps.used_ids:
+                continue
+            ps.used_ids.append(qid)
+
             st.last_question = {
                 "skill": skill,
-                "question_id": q["question_id"],
-                "question": q["question"],
-                "options": options,
+                "question_id": qid,
+                "question": q_full["question"],
+                "options": q_full["options"],
                 "difficulty_shown": tier,
+                "difficulty_label": q_full.get("difficulty", "Intermediate"),
+                "topic": q_full.get("topic", skill),
+                "correct_answer": q_full["correct_answer"],
+                "explanation": q_full.get("explanation", ""),
             }
+
+            client_q = {
+                **public_question_view(q_full),
+                "skill": skill,
+                "question_id": qid,
+                "difficulty_tier": tier,
+                "difficulty_label": q_full.get("difficulty", "Intermediate"),
+                "topic": q_full.get("topic", skill),
+            }
+
             return {
                 "done": False,
                 "session_id": st.session_id,
-                "question": {
-                    "skill": skill,
-                    "question_id": q["question_id"],
-                    "question": q["question"],
-                    "options": options,
-                    "difficulty_tier": tier,
-                },
+                "question": client_q,
             }
 
-        return {"done": True, "message": "No more questions available — finalize."}
+        return {"done": True, "message": "No more questions could be generated — finalize your assessment."}
 
     async def submit_answer(
         self, session_id: str, question_id: str, selected_option: str
@@ -172,15 +151,13 @@ class AssessmentAgent:
                 return None, {"error": "Invalid or expired session"}
 
             if st.last_question.get("question_id") != question_id:
-                return st, {"error": "Question mismatch — request next question."}
+                return st, {"error": "Question mismatch — reload the latest question."}
 
             skill = st.last_question["skill"]
-            q_meta = None
-            for q in ASSESSMENT_QUESTIONS.get(skill, []):
-                if q["question_id"] == question_id:
-                    q_meta = q
-                    break
-            correct_text = q_meta["correct_answer"] if q_meta else ""
+            correct_text = st.last_question.get("correct_answer", "")
+            explanation = st.last_question.get("explanation", "")
+            stem = st.last_question.get("question", "")
+
             is_correct = _similarity(selected_option, correct_text) >= 0.55
 
             ps = st.per_skill[skill]
@@ -200,13 +177,18 @@ class AssessmentAgent:
                     "question_id": question_id,
                     "correct": is_correct,
                     "tier": tier,
+                    "stem": stem,
                 }
             )
             st.questions_answered += 1
             st.last_question = None
 
-            next_q = self._next_question_payload(st)
-            return st, {"correct": is_correct, "next": next_q}
+            next_q = await self._next_question_payload_async(st)
+            return st, {
+                "correct": is_correct,
+                "explanation": explanation if explanation else None,
+                "next": next_q,
+            }
 
     def finalize_levels(self, st: SessionState) -> Dict[str, Any]:
         out = {}

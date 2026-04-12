@@ -25,6 +25,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _resource_blurbs(topic: str) -> tuple[str, str]:
+    t = (topic or "this topic").strip()
+    youtube_desc = (
+        "What it teaches: a curated tutorial-style video match for your roadmap topic. "
+        "Why it matters: seeing code built step-by-step lowers the activation energy to start. "
+        "Who it is for: learners who prefer demos alongside reading. "
+        f"Outcome: a concrete reference you can pause, rewind, and replicate for “{t}”."
+    )
+    gfg_desc = (
+        "What it teaches: practice-oriented articles and problem hubs surfaced via focused search. "
+        "Why it matters: reinforces the same topic with different explanations and exercises. "
+        "Who it is for: students preparing for quizzes and interviews. "
+        f"Outcome: extra reps and patterns mapped to “{t}” without changing your workflow."
+    )
+    return youtube_desc, gfg_desc
+
+
 def _norm_topic(t: str) -> str:
     return re.sub(r"\s+", " ", (t or "").strip()).lower()
 
@@ -161,12 +178,19 @@ async def get_resources(topic: str = Query(min_length=1, max_length=200), _: dic
             _ensure_client()
             existing = await resources_collection.find_one({"topicNorm": norm}, {"_id": 0})
             if existing and existing.get("youtubeLink") and existing.get("gfgLink"):
-                return {"youtubeLink": existing["youtubeLink"], "gfgLink": existing["gfgLink"]}
+                yd, gd = _resource_blurbs(topic)
+                return {
+                    "youtubeLink": existing["youtubeLink"],
+                    "gfgLink": existing["gfgLink"],
+                    "youtubeDescription": existing.get("youtubeDescription") or yd,
+                    "gfgDescription": existing.get("gfgDescription") or gd,
+                }
         except Exception:
             pass
 
     youtube = await _youtube_best_video(topic)
     gfg = await _gfg_best_link(topic)
+    youtube_description, gfg_description = _resource_blurbs(topic)
 
     if mongo_enabled():
         try:
@@ -176,11 +200,18 @@ async def get_resources(topic: str = Query(min_length=1, max_length=200), _: dic
                 "topicNorm": norm,
                 "youtubeLink": youtube,
                 "gfgLink": gfg,
+                "youtubeDescription": youtube_description,
+                "gfgDescription": gfg_description,
                 "source": "ai",
                 "createdAt": _now_iso(),
             }
             await resources_collection.update_one({"topicNorm": norm}, {"$set": doc}, upsert=True)
         except Exception:
             pass
-    return {"youtubeLink": youtube, "gfgLink": gfg}
+    return {
+        "youtubeLink": youtube,
+        "gfgLink": gfg,
+        "youtubeDescription": youtube_description,
+        "gfgDescription": gfg_description,
+    }
 
