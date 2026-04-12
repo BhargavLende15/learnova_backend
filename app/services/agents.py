@@ -7,6 +7,10 @@ from typing import Optional
 from app.config import get_settings
 
 settings = get_settings()
+
+import os
+os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY  
+
 HAS_OPENAI = bool(settings.OPENAI_API_KEY)
 
 
@@ -40,55 +44,101 @@ def tool_roadmap_suggestion(gap: list, scores: dict) -> str:
 # ---------- Mentor Chat (AI) ----------
 async def mentor_chat(user_id: str, message: str, context: Optional[dict] = None) -> str:
     """
-    AI Mentor Chatbot - Answers user questions about learning path.
-    Uses OpenAI if available, else rule-based responses.
+    AI Mentor Chatbot - Uses:
+    1. OpenAI (if available)
+    2. Groq (FREE fallback)
+    3. Rule-based fallback
     """
-    if not HAS_OPENAI:
-        return _rule_based_mentor(message, context or {})
 
+    ctx = context or {}
+
+    # ---------- 1️⃣ OpenAI ----------
+    if HAS_OPENAI:
+        try:
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0.7,
+                api_key=settings.OPENAI_API_KEY
+            )
+
+            sys = """You are an AI career mentor for Learnova.
+            Give clear, practical, step-by-step advice."""
+
+            msgs = [
+                SystemMessage(content=sys + f"\nUser context: {ctx}"),
+                HumanMessage(content=message),
+            ]
+
+            resp = await llm.ainvoke(msgs)
+            return resp.content
+
+        except Exception:
+            pass  # fallback to Groq
+
+    # ---------- 2️⃣ Groq (FREE) ----------
     try:
-        from langchain_openai import ChatOpenAI
-        from langchain_core.messages import HumanMessage, SystemMessage
+        from groq import Groq
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
-        sys = """You are an AI career mentor for Learnova. Help users with:
-        - What to learn next based on their skills
-        - Motivation and study tips
-        - Career advice for Data Scientist, Web Developer, AI Engineer roles
-        Be concise and actionable."""
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-        ctx = context or {}
-        user_ctx = f"\nUser context: goal={ctx.get('goal','')}, skills={ctx.get('skills',{})}, gap={ctx.get('gap',[])}"
-        msgs = [
-            SystemMessage(content=sys + user_ctx),
-            HumanMessage(content=message),
-        ]
-        resp = await llm.ainvoke(msgs)
-        return resp.content
-    except Exception as e:
-        return _rule_based_mentor(message, context or {}) + f" (AI unavailable: {e})"
+        prompt = f"""
+        You are an AI career mentor.
 
+        Goal: {ctx.get("goal")}
+        Skills: {ctx.get("skills")}
+        Gaps: {ctx.get("gap")}
+
+        Question: {message}
+
+        Give short, actionable guidance.
+        """
+
+        chat_completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama3-8b-8192",
+        )
+
+        return chat_completion.choices[0].message.content
+
+    except Exception:
+        pass
+
+    # ---------- 3️⃣ Rule-based ----------
+    return _rule_based_mentor(message, ctx)
 
 def _rule_based_mentor(message: str, context: dict) -> str:
     """Fallback rule-based mentor when OpenAI is not available."""
+
     msg_lower = message.lower()
     gap = context.get("gap", [])
     skills = context.get("skills", {})
     goal = context.get("goal", "")
 
+    # 🔹 Learn next
     if "next" in msg_lower or "learn" in msg_lower:
         if gap:
-            return f"You should learn {gap[0]} next. It's a key skill for {goal} and you haven't mastered it yet."
-        return "Great progress! Consider advanced projects or a new role goal."
+            return f"You should learn '{gap[0]}' next for becoming a {goal}. Focus on basics and practice projects."
+        return f"You are doing well in {goal}. Start building advanced projects now."
 
+    # 🔹 Improve skills (NEW FIX 🔥)
+    if "improve" in msg_lower or "progress" in msg_lower:
+        if gap:
+            return f"To improve, focus on these weak areas: {', '.join(gap[:3])}. Practice consistently and revise concepts."
+        return "Your skills look good. Try solving real-world problems and building projects."
+
+    # 🔹 Motivation
     if "motivat" in msg_lower or "stuck" in msg_lower:
-        return "Every expert was once a beginner. Focus on one skill at a time and practice daily. You've got this!"
+        return "You're not stuck, you're learning. Stay consistent, even 1% daily improvement is powerful."
 
-    if "roadmap" in msg_lower:
-        return f"Your roadmap for {goal}: " + " → ".join(gap[:5]) if gap else "Complete the assessment to get your roadmap."
+    # 🔹 Roadmap
+    if "roadmap" in msg_lower or "plan" in msg_lower:
+        return f"Your roadmap for {goal}: " + " → ".join(gap[:5]) if gap else "Complete the assessment to generate your roadmap."
 
-    return "I'm your AI mentor! Ask me what to learn next, for motivation, or about your roadmap."
-
+    # 🔹 Default (improved ❗)
+    return f"For your goal '{goal}', focus on improving weak skills like {', '.join(gap[:2]) if gap else 'advanced topics'} and keep practicing."
 
 # ---------- Agentic Workflow (orchestrator) ----------
 async def run_agentic_workflow(
