@@ -9,6 +9,10 @@ from typing import Any, Optional
 from app.config import get_settings
 
 settings = get_settings()
+
+import os
+os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY  
+
 HAS_OPENAI = bool(settings.OPENAI_API_KEY)
 
 
@@ -60,6 +64,35 @@ async def mentor_chat(user_id: str, message: str, context: Optional[dict] = None
     if not HAS_OPENAI:
         return _rule_based_mentor(message, ctx)
 
+    ctx = context or {}
+
+    # ---------- 1️⃣ OpenAI ----------
+    if HAS_OPENAI:
+        try:
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0.7,
+                api_key=settings.OPENAI_API_KEY
+            )
+
+            sys = """You are an AI career mentor for Learnova.
+            Give clear, practical, step-by-step advice."""
+
+            msgs = [
+                SystemMessage(content=sys + f"\nUser context: {ctx}"),
+                HumanMessage(content=message),
+            ]
+
+            resp = await llm.ainvoke(msgs)
+            return resp.content
+
+        except Exception:
+            pass  # fallback to Groq
+
+    # ---------- 2️⃣ Groq (FREE) ----------
     try:
         from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -97,6 +130,30 @@ USER CONTEXT (JSON):
     except Exception as e:
         return _rule_based_mentor(message, ctx) + f"\n\n(Live AI briefly unavailable — {e})"
 
+        prompt = f"""
+        You are an AI career mentor.
+
+        Goal: {ctx.get("goal")}
+        Skills: {ctx.get("skills")}
+        Gaps: {ctx.get("gap")}
+
+        Question: {message}
+
+        Give short, actionable guidance.
+        """
+
+        chat_completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama3-8b-8192",
+        )
+
+        return chat_completion.choices[0].message.content
+
+    except Exception:
+        pass
+
+    # ---------- 3️⃣ Rule-based ----------
+    return _rule_based_mentor(message, ctx)
 
 def _rule_based_mentor(message: str, context: dict) -> str:
     """Structured fallback when OpenAI is unavailable."""
@@ -203,6 +260,8 @@ def _rule_based_mentor(message: str, context: dict) -> str:
         f"Your saved goal is **{goal or 'not set yet'}**. What would you like to dig into?"
     )
 
+    # 🔹 Default (improved ❗)
+    return f"For your goal '{goal}', focus on improving weak skills like {', '.join(gap[:2]) if gap else 'advanced topics'} and keep practicing."
 
 # ---------- Agentic Workflow (orchestrator) ----------
 async def run_agentic_workflow(

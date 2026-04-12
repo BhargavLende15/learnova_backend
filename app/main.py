@@ -14,6 +14,10 @@ from app.routers.api_auth import router as api_auth_router
 from app.routers.public_endpoints import router as public_router
 from app.seed_skills import seed_skills
 
+from app.config import get_settings
+
+settings = get_settings()
+print("API KEY:", settings.OPENAI_API_KEY[:10])
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
