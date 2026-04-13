@@ -11,9 +11,15 @@ from app.sql_models import AssessmentResultRow, RoadmapRow, UserGoalSkills
 router = APIRouter(prefix="/mentor", tags=["mentor"])
 
 
+class MentorHistoryTurn(BaseModel):
+    role: str
+    content: str
+
+
 class MentorRequest(BaseModel):
     user_id: str
     message: str
+    history: list[MentorHistoryTurn] | None = None
 
 
 @router.post("/chat")
@@ -52,5 +58,10 @@ async def mentor_chat_endpoint(data: MentorRequest, session: AsyncSession = Depe
         context["roadmap_progress"] = progress
         context["completed_topic_ids"] = list(progress.get("completed_ids") or [])
 
-    reply = await mentor_chat(data.user_id, data.message, context)
+    hist = (
+        [{"role": t.role, "content": t.content} for t in (data.history or [])]
+        if data.history
+        else None
+    )
+    reply = await mentor_chat(data.user_id, data.message, context, history=hist)
     return {"reply": reply}
