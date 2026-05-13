@@ -1,6 +1,5 @@
 """
-Dynamic MCQ generation for assessments — OpenAI when configured, else seeded procedural fallback.
-Outputs are validated (4 options, correct ∈ options, non-empty stems).
+Dynamic MCQ generation: Gemini → Ollama → assessment_questions bank → procedural fallback.
 """
 from __future__ import annotations
 
@@ -11,11 +10,13 @@ import re
 import uuid
 from typing import Any, List, Optional, Tuple
 
-from app.config import get_settings
+from app.assessment_questions import pick_bank_mcq_for_skill
+from app.services.ai_provider_log import log_ai_provider
+from app.services.gemini_client import gemini_generate_json, ollama_generate_json
 
 _TIER_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced"}
 
-# Procedural fallback: (question, correct, distractors[3]) — not loaded from DB; used only if LLM unavailable.
+# Last-resort procedural bank when skill is not in assessment_questions._RAW_BANK
 _FALLBACK_BANK: dict[str, List[Tuple[str, str, Tuple[str, str, str]]]] = {
     "Python": [
         (
@@ -177,7 +178,6 @@ def _norm_stem(s: str) -> str:
 def _bank_for_skill(skill: str) -> List[Tuple[str, str, Tuple[str, str, str]]]:
     if skill in _FALLBACK_BANK:
         return _FALLBACK_BANK[skill]
-    # Merge similar stacks for skills without a bespoke list
     return _FALLBACK_BANK.get("Python", []) + _FALLBACK_BANK.get("Machine Learning", [])
 
 
@@ -214,83 +214,25 @@ def _fallback_mcq(
         "question": q,
         "options": opts,
         "correct_answer": c,
+        "source": "hardcoded_procedural",
         "difficulty": diff,
         "topic": skill,
         "explanation": f"The best choice is “{c}” because it matches standard definitions for {skill} at a {diff.lower()} level.",
     }
 
 
-async def _openai_mcq(
+def _validate_mcq_payload(
+    data: dict[str, Any],
     skill: str,
     tier: int,
-    session_id: str,
-    user_id: str,
-    questions_answered: int,
-    max_questions: int,
     avoid_stems: List[str],
 ) -> Optional[dict[str, Any]]:
-    settings = get_settings()
-    if not settings.OPENAI_API_KEY:
-        return None
-    try:
-        from openai import AsyncOpenAI
-    except ImportError:
-        return None
-
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    diff = _TIER_LABEL.get(max(1, min(3, tier)), "Intermediate")
-    avoid_txt = "; ".join(avoid_stems[-12:]) if avoid_stems else "(none)"
-
-    system = """You are an expert technical educator writing single-answer multiple-choice questions.
-Rules:
-- Output ONLY valid JSON, no markdown.
-- Keys: question, options (array of exactly 4 distinct strings), correctAnswer (must equal exactly one element of options), difficulty, topic, explanation (1-3 sentences).
-- Distractors must be plausible for someone studying the topic; no joke answers, no "all of the above".
-- The question must be fresh and not a duplicate of any stem listed under avoidStems.
-- Verify correctAnswer is verbatim one of options."""
-
-    user_payload = {
-        "skill": skill,
-        "difficulty": diff,
-        "roadmapDomain": skill,
-        "progressStage": f"question {questions_answered + 1} of {max_questions}",
-        "topic": skill,
-        "sessionId": session_id,
-        "userId": user_id,
-        "avoidStems": avoid_stems[-20:],
-    }
-
-    try:
-        comp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.85,
-            max_tokens=650,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "task": "Write one MCQ for adaptive assessment.",
-                            "context": user_payload,
-                            "avoidText": avoid_txt,
-                        }
-                    ),
-                },
-            ],
-        )
-        raw = (comp.choices[0].message.content or "").strip()
-        data = json.loads(raw)
-    except Exception:
-        return None
-
     q = str(data.get("question", "")).strip()
     opts = data.get("options")
     ca = str(data.get("correctAnswer", data.get("correct_answer", ""))).strip()
     expl = str(data.get("explanation", "")).strip()
     topic = str(data.get("topic", skill)).strip() or skill
-    diff_out = str(data.get("difficulty", diff)).strip() or diff
+    diff_out = str(data.get("difficulty", _TIER_LABEL.get(max(1, min(3, tier)), "Intermediate"))).strip()
 
     if not q or not isinstance(opts, list) or len(opts) != 4:
         return None
@@ -303,15 +245,81 @@ Rules:
         if stem and _norm_stem(stem) == _norm_stem(q):
             return None
 
+    src = str(data.get("source", "llm")).strip() or "llm"
     return {
         "question_id": f"ai_{uuid.uuid4().hex[:12]}",
         "question": q,
         "options": opts,
         "correct_answer": ca,
+        "source": src,
         "difficulty": diff_out,
         "topic": topic,
         "explanation": expl or f"Correct: {ca}",
     }
+
+
+async def _gemini_mcq(
+    skill: str,
+    tier: int,
+    session_id: str,
+    user_id: str,
+    questions_answered: int,
+    max_questions: int,
+    avoid_stems: List[str],
+) -> Optional[dict[str, Any]]:
+    diff = _TIER_LABEL.get(max(1, min(3, tier)), "Intermediate")
+    system = (
+        "Return only JSON: question, options (4 distinct strings), correctAnswer (must equal one option), "
+        "difficulty, topic, explanation (one short sentence). Plausible wrong answers."
+    )
+    user_payload = {
+        "skill": skill,
+        "difficulty": diff,
+        "avoidStems": avoid_stems[-12:],
+        "progress": f"{questions_answered + 1}/{max_questions}",
+        "sessionId": session_id,
+    }
+    data = await gemini_generate_json(
+        system_prompt=system,
+        user_prompt=json.dumps(user_payload),
+        temperature=0.75,
+        max_output_tokens=450,
+    )
+    if not data:
+        return None
+    out = _validate_mcq_payload({**data, "source": "gemini"}, skill, tier, avoid_stems)
+    return out
+
+
+async def _ollama_mcq(
+    skill: str,
+    tier: int,
+    session_id: str,
+    user_id: str,
+    questions_answered: int,
+    max_questions: int,
+    avoid_stems: List[str],
+) -> Optional[dict[str, Any]]:
+    diff = _TIER_LABEL.get(max(1, min(3, tier)), "Intermediate")
+    system = (
+        "Return only JSON: question, options (4 strings), correctAnswer (one of options), "
+        "difficulty, topic, explanation (short)."
+    )
+    user_payload = {
+        "skill": skill,
+        "difficulty": diff,
+        "avoidStems": avoid_stems[-10:],
+        "progress": f"{questions_answered + 1}/{max_questions}",
+        "sessionId": session_id,
+    }
+    data = await ollama_generate_json(
+        system_prompt=system,
+        user_prompt=json.dumps(user_payload),
+        timeout_seconds=14.0,
+    )
+    if not data:
+        return None
+    return _validate_mcq_payload({**data, "source": "ollama"}, skill, tier, avoid_stems)
 
 
 async def generate_assessment_question(
@@ -325,19 +333,30 @@ async def generate_assessment_question(
 ) -> dict[str, Any]:
     """
     Returns a full question dict including server-only fields correct_answer and explanation.
+    Order: Gemini → Ollama → assessment_questions.py → procedural bank.
     """
-    out = await _openai_mcq(
-        skill,
-        tier,
-        session_id,
-        user_id,
-        questions_answered,
-        max_questions,
-        avoid_stems,
+    g = await _gemini_mcq(
+        skill, tier, session_id, user_id, questions_answered, max_questions, avoid_stems
     )
-    if out:
-        return out
-    return _fallback_mcq(skill, tier, session_id, avoid_stems)
+    if g:
+        log_ai_provider(f"assessment_question[{skill}]", "gemini")
+        return g
+
+    o = await _ollama_mcq(
+        skill, tier, session_id, user_id, questions_answered, max_questions, avoid_stems
+    )
+    if o:
+        log_ai_provider(f"assessment_question[{skill}]", "ollama")
+        return o
+
+    b = pick_bank_mcq_for_skill(skill, tier, session_id, avoid_stems)
+    if b:
+        log_ai_provider(f"assessment_question[{skill}]", "hardcoded")
+        return b
+
+    out = _fallback_mcq(skill, tier, session_id, avoid_stems)
+    log_ai_provider(f"assessment_question[{skill}]", "hardcoded_procedural")
+    return out
 
 
 def public_question_view(q: dict) -> dict:

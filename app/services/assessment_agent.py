@@ -74,7 +74,8 @@ class AssessmentAgent:
 
     async def start_session(self, user_id: str, skills: List[str]) -> Tuple[SessionState, dict]:
         sid = str(uuid.uuid4())
-        st = SessionState(session_id=sid, user_id=user_id, skills=list(skills))
+        cap = max(5, len(skills) * 5) if skills else 15
+        st = SessionState(session_id=sid, user_id=user_id, skills=list(skills), max_questions=cap)
         async with self._lock:
             self._sessions[sid] = st
         q_payload = await self._next_question_payload_async(st)

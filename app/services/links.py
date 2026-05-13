@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote_plus
 
 
@@ -133,4 +135,97 @@ def generate_practice_links(topic_name: str) -> list[dict]:
             ),
         },
     ]
+
+
+def _splice_descriptions(items: list[dict], descs: list[str] | None) -> list[dict]:
+    if not descs:
+        return [dict(x) for x in items]
+    out: list[dict] = []
+    for i, item in enumerate(items):
+        d = dict(item)
+        if i < len(descs) and descs[i].strip():
+            d["description"] = descs[i].strip()
+        out.append(d)
+    return out
+
+
+def _merge_link_ai_descriptions(
+    base: GeneratedLinks,
+    data: dict[str, Any],
+) -> GeneratedLinks | None:
+    r_raw, v_raw, p_raw = data.get("reading"), data.get("videos"), data.get("practice")
+    if not isinstance(r_raw, list) or not isinstance(v_raw, list) or not isinstance(p_raw, list):
+        return None
+    r = [str(x).strip() for x in r_raw]
+    v = [str(x).strip() for x in v_raw]
+    p = [str(x).strip() for x in p_raw]
+    if len(r) != len(base.reading) or len(v) != len(base.videos) or len(p) != len(base.practice):
+        return None
+    if not any(r) and not any(v) and not any(p):
+        return None
+    return GeneratedLinks(
+        reading=_splice_descriptions(base.reading, r),
+        videos=_splice_descriptions(base.videos, v),
+        practice=_splice_descriptions(base.practice, p),
+    )
+
+
+async def generate_resource_links_with_ai(topic_name: str) -> GeneratedLinks:
+    """Same URLs as generate_resource_links; optional short AI descriptions (Gemini → Ollama)."""
+    base = generate_resource_links(topic_name)
+    topic = (topic_name or "").strip()
+    if not topic:
+        return base
+
+    from app.services.ai_provider_log import log_ai_provider
+    from app.services.gemini_client import gemini_generate_json, ollama_generate_json
+
+    sys_p = (
+        "Return JSON only. Keys: reading, videos, practice — arrays of short strings. "
+        f"Exactly {len(base.reading)}, {len(base.videos)}, {len(base.practice)} items. "
+        "Each string: one learning-focused blurb (max 25 words) for that slot; no URLs."
+    )
+    user_p = json.dumps({"topic": topic})
+    payload = await gemini_generate_json(sys_p, user_p, temperature=0.35, max_output_tokens=450)
+    merged = _merge_link_ai_descriptions(base, payload) if payload else None
+    if merged:
+        log_ai_provider("practice_resources", "gemini")
+        return merged
+    payload = await ollama_generate_json(sys_p, user_p, timeout_seconds=12.0)
+    merged = _merge_link_ai_descriptions(base, payload) if payload else None
+    if merged:
+        log_ai_provider("practice_resources", "ollama")
+        return merged
+    log_ai_provider("practice_resources", "hardcoded")
+    return base
+
+
+async def generate_practice_links_with_ai(topic_name: str) -> list[dict]:
+    """Practice links with optional AI-written descriptions."""
+    base = generate_practice_links(topic_name)
+    topic = (topic_name or "").strip()
+    if not topic:
+        return base
+
+    from app.services.ai_provider_log import log_ai_provider
+    from app.services.gemini_client import gemini_generate_json, ollama_generate_json
+
+    n = len(base)
+    sys_p = (
+        "Return JSON only. Key practice: array of short strings. "
+        f"Exactly {n} items. Each: max 25 words, why use that practice site for this topic. No URLs."
+    )
+    user_p = json.dumps({"topic": topic})
+    payload = await gemini_generate_json(sys_p, user_p, temperature=0.35, max_output_tokens=320)
+    pr = payload.get("practice") if isinstance(payload, dict) else None
+    if isinstance(pr, list) and len(pr) == n and any(str(x).strip() for x in pr):
+        log_ai_provider("practice_links", "gemini")
+        return _splice_descriptions(base, [str(x).strip() for x in pr])
+    payload = await ollama_generate_json(sys_p, user_p, timeout_seconds=10.0)
+    pr = payload.get("practice") if isinstance(payload, dict) else None
+    if isinstance(pr, list) and len(pr) == n and any(str(x).strip() for x in pr):
+        log_ai_provider("practice_links", "ollama")
+        return _splice_descriptions(base, [str(x).strip() for x in pr])
+    log_ai_provider("practice_links", "hardcoded")
+    return base
 

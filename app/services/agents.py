@@ -1,21 +1,17 @@
 """
 Agentic AI Layer - Skill Analyzer, Industry Expert, Roadmap Agent, Mentor Agent.
-Mentor chat uses the OpenAI API when OPENAI_API_KEY is set; otherwise rule-based fallback.
+Mentor chat: Gemini → Ollama → rule-based fallback.
 """
 import json
 import logging
-import os
 import re
 from typing import Any, List, Optional
 
 from app.config import get_settings
+from app.services.ai_provider_log import log_ai_provider
+from app.services.gemini_client import gemini_generate_text, ollama_generate_text
 
 logger = logging.getLogger(__name__)
-
-settings = get_settings()
-if settings.OPENAI_API_KEY:
-    os.environ.setdefault("OPENAI_API_KEY", settings.OPENAI_API_KEY)
-
 
 # ---------- Tool Functions (used by agents) ----------
 def tool_skill_analyzer(assessment_scores: dict, goal: str) -> str:
@@ -59,28 +55,14 @@ def _mentor_context_block(ctx: dict) -> str:
 
 
 def _mentor_system_message(ctx: dict) -> str:
-    return f"""You are Learnova Coach, a senior mentor for a personalized learning platform.
-
-Use the JSON user context as ground truth. Personalize every answer; avoid vague generic advice.
-
-You help with:
-- Why this roadmap or skill order fits their goal
-- What to learn next and how to start today
-- Explaining roadmap phases or weekly focus
-- Career guidance tied to their stated goal and skills
-- Clearing up quiz/assessment doubts (explain concepts; never reveal correct answers or hidden solutions)
-- Technology explanations in plain language
-- Motivation without sounding repetitive
-
-Rules:
-- Reference specific skills, levels, or phase names from context when relevant.
-- If context is thin, say what is missing (e.g. save goal/skills, finish assessment) and still give one useful next step.
-- Keep answers scannable: short paragraphs or bullets, under ~280 words unless the user asks for depth.
-- Never fabricate assessment scores or roadmap content; if missing, say so.
-
-USER CONTEXT (JSON):
-{_mentor_context_block(ctx)}
-"""
+    return (
+        "You are Learnova Coach. Use the JSON context as the only source of truth for their profile. "
+        "Help with roadmap, next steps, skills, careers, motivation. "
+        "Short bullets or brief paragraphs; aim under ~200 words. "
+        "Explain quiz concepts but never give correct answers or hidden solutions. "
+        "If context is missing something, say what to fill in and give one concrete next step.\n"
+        f"CONTEXT:\n{_mentor_context_block(ctx)}"
+    )
 
 
 def _sanitize_history(history: Optional[List[dict[str, str]]], limit: int = 24) -> List[dict[str, str]]:
@@ -104,7 +86,7 @@ async def mentor_chat(
 ) -> str:
     """
     Contextual coach: roadmap rationale, next steps, quiz help, careers, motivation.
-    Uses OpenAI when configured; otherwise rule-based fallback.
+    Gemini → Ollama → rule-based fallback.
     """
     ctx = context or {}
     text = (message or "").strip()
@@ -112,31 +94,53 @@ async def mentor_chat(
         return "Ask me anything about your roadmap, skills, or next steps."
 
     s = get_settings()
-    if not (s.OPENAI_API_KEY or "").strip():
-        return _rule_based_mentor(text, ctx)
+    system = _mentor_system_message(ctx)
+    history_lines: List[str] = []
+    for h in _sanitize_history(history):
+        history_lines.append(f"{h['role']}: {h['content']}")
+    user_prompt = "\n".join(
+        [
+            "Conversation history:",
+            "\n".join(history_lines) if history_lines else "(none)",
+            "",
+            f"Latest user message: {text[:12_000]}",
+            "Write the assistant reply only.",
+        ]
+    )
+
+    if (s.GEMINI_API_KEY or "").strip():
+        try:
+            reply = (
+                await gemini_generate_text(
+                    system_prompt=system,
+                    user_prompt=user_prompt,
+                    temperature=0.65,
+                    max_output_tokens=700,
+                )
+                or ""
+            ).strip()
+            if reply:
+                log_ai_provider("mentor_chat", "gemini")
+                return reply
+        except Exception as exc:
+            logger.warning("Mentor Gemini chat failed, trying Ollama: %s", exc)
 
     try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(api_key=s.OPENAI_API_KEY)
-        system = _mentor_system_message(ctx)
-        msgs: List[dict[str, str]] = [{"role": "system", "content": system}]
-        for h in _sanitize_history(history):
-            msgs.append(h)
-        msgs.append({"role": "user", "content": text[:12_000]})
-
-        comp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.65,
-            max_tokens=900,
-            messages=msgs,
-        )
-        reply = (comp.choices[0].message.content or "").strip()
+        reply = (
+            await ollama_generate_text(
+                system_prompt=system,
+                user_prompt=user_prompt,
+                timeout_seconds=14.0,
+            )
+            or ""
+        ).strip()
         if reply:
+            log_ai_provider("mentor_chat", "ollama")
             return reply
     except Exception as exc:
-        logger.warning("Mentor OpenAI chat failed, using rule-based fallback: %s", exc)
+        logger.warning("Mentor Ollama chat failed, using rules: %s", exc)
 
+    log_ai_provider("mentor_chat", "hardcoded")
     return _rule_based_mentor(text, ctx)
 
 def _rule_based_mentor(message: str, context: dict) -> str:

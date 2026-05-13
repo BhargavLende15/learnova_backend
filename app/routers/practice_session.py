@@ -7,7 +7,10 @@ from pydantic import BaseModel, Field
 
 from app.database import mongo_enabled, _ensure_client
 from app import database as db
-from app.services.links import generate_practice_links, generate_resource_links
+from app.services.links import (
+    generate_practice_links_with_ai,
+    generate_resource_links_with_ai,
+)
 
 
 router = APIRouter(tags=["practice"])
@@ -19,13 +22,13 @@ class GenerateBody(BaseModel):
 
 @router.post("/generate-resources")
 async def generate_resources(body: GenerateBody):
-    links = generate_resource_links(body.topic_name)
+    links = await generate_resource_links_with_ai(body.topic_name)
     return {"topic_name": body.topic_name, "reading": links.reading, "videos": links.videos}
 
 
 @router.post("/generate-practice-links")
 async def generate_practice(body: GenerateBody):
-    links = generate_practice_links(body.topic_name)
+    links = await generate_practice_links_with_ai(body.topic_name)
     return {"topic_name": body.topic_name, "practice": links}
 
 

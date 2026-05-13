@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import hashlib
 import random
+import re
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.catalog_data import SKILLS_BY_GOAL
 from app.models import SkillLevel
@@ -464,6 +465,60 @@ _RAW_BANK["Deep Learning"] = [
         "A confusion matrix only",
     ),
 ]
+
+_TIER_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced"}
+
+
+def _norm_stem(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())[:200]
+
+
+def _bank_key_for_skill(skill: str) -> Optional[str]:
+    if skill in _RAW_BANK:
+        return skill
+    sl = (skill or "").strip().lower()
+    for k in _RAW_BANK:
+        if k.lower() == sl:
+            return k
+    return None
+
+
+def pick_bank_mcq_for_skill(
+    skill: str,
+    tier: int,
+    session_id: str,
+    avoid_stems: List[str],
+) -> Optional[Dict[str, Any]]:
+    """One MCQ from the static bank; None if skill has no banked items."""
+    key = _bank_key_for_skill(skill)
+    if not key:
+        return None
+    bank = _RAW_BANK[key]
+    avoid_n = {_norm_stem(x) for x in avoid_stems if x}
+    pool = [q for q in bank if _norm_stem(q["question"]) not in avoid_n] or list(bank)
+    salt = f"{session_id}:{key}:{tier}:{len(avoid_stems)}"
+    h = hashlib.sha256(salt.encode("utf-8")).digest()
+    pick = pool[int.from_bytes(h[:8], "big") % len(pool)]
+    rng = random.Random(
+        int.from_bytes(
+            hashlib.sha256(f"{session_id}:{pick['question_id']}".encode("utf-8")).digest()[:8],
+            "big",
+        )
+    )
+    opts = list(pick["options"])
+    rng.shuffle(opts)
+    t = max(1, min(3, int(tier)))
+    diff = _TIER_LABEL.get(t, "Intermediate")
+    return {
+        "question_id": pick["question_id"],
+        "question": pick["question"],
+        "options": opts,
+        "correct_answer": pick["correct_answer"],
+        "source": "hardcoded",
+        "difficulty": diff,
+        "topic": skill,
+        "explanation": f"The correct choice is: {pick['correct_answer']}.",
+    }
 
 
 def _flatten_for_skills(skills: List[str]) -> List[Dict[str, Any]]:
