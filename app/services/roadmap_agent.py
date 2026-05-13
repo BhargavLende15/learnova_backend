@@ -4,10 +4,14 @@ from career goal and per-skill levels from the assessment.
 """
 from __future__ import annotations
 
+import copy
 import uuid
+import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from app.services.ai_provider_log import log_ai_provider
+from app.services.gemini_client import gemini_generate_json, ollama_generate_json
 
 def _resource(skill: str, phase: str, idx: int) -> dict:
     titles = {
@@ -206,6 +210,7 @@ def build_roadmap_payload(
 
     return {
         "career_goal": career_goal,
+        "generation_source": "hardcoded",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "phases": phases,
         "progress": {
@@ -215,3 +220,208 @@ def build_roadmap_payload(
         },
         "item_index": item_ids,
     }
+
+
+def _norm_phase_name(name: str) -> str:
+    n = (name or "").strip().lower()
+    if n.startswith("found"):
+        return "Foundation"
+    if n.startswith("prac"):
+        return "Practice"
+    if n.startswith("proj"):
+        return "Project"
+    return ""
+
+
+def _pick_list(value: Any, default: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        return default
+    out = [str(x).strip() for x in value if str(x).strip()]
+    return out or default
+
+
+def _coerce_ai_roadmap(ai_payload: dict[str, Any], fallback: dict[str, Any], source: str) -> dict | None:
+    phases_in = ai_payload.get("phases")
+    if not isinstance(phases_in, list) or not phases_in:
+        return None
+
+    by_name: dict[str, dict[str, Any]] = {}
+    for ph in phases_in:
+        if not isinstance(ph, dict):
+            continue
+        n = _norm_phase_name(str(ph.get("name", "")))
+        if n:
+            by_name[n] = ph
+
+    out = dict(fallback)
+    out["generation_source"] = source
+    out["generated_at"] = datetime.now(timezone.utc).isoformat()
+    out["career_goal"] = str(ai_payload.get("career_goal") or fallback.get("career_goal") or "")
+
+    merged_phases: list[dict[str, Any]] = []
+    for fb_phase in fallback.get("phases", []):
+        fb_name = str(fb_phase.get("name", ""))
+        ai_phase = by_name.get(fb_name, {})
+
+        weeks_raw = ai_phase.get("timeline_weeks")
+        weeks = fb_phase.get("timeline_weeks", 3)
+        if isinstance(weeks_raw, int) and 1 <= weeks_raw <= 16:
+            weeks = weeks_raw
+
+        phase_out = dict(fb_phase)
+        if isinstance(ai_phase.get("description"), str) and ai_phase["description"].strip():
+            phase_out["description"] = ai_phase["description"].strip()
+        if isinstance(ai_phase.get("timeline_rationale"), str) and ai_phase["timeline_rationale"].strip():
+            phase_out["timeline_rationale"] = ai_phase["timeline_rationale"].strip()
+        phase_out["timeline_weeks"] = weeks
+
+        ai_weeks = ai_phase.get("weekly_breakdown")
+        if isinstance(ai_weeks, list) and ai_weeks:
+            base_weeks = phase_out.get("weekly_breakdown") or []
+            merged_weeks: list[dict[str, Any]] = []
+            for i, wb in enumerate(ai_weeks):
+                default_w = base_weeks[i] if i < len(base_weeks) and isinstance(base_weeks[i], dict) else {}
+                if not isinstance(wb, dict):
+                    continue
+                w = dict(default_w)
+                w["week"] = int(wb.get("week")) if isinstance(wb.get("week"), int) else (i + 1)
+                for key in ("focus_skill", "title", "milestone"):
+                    val = wb.get(key)
+                    if isinstance(val, str) and val.strip():
+                        w[key] = val.strip()
+                if isinstance(wb.get("estimated_effort_hours"), int):
+                    w["estimated_effort_hours"] = wb["estimated_effort_hours"]
+                for key in ("topics", "subtopics", "practice_tasks", "mini_projects", "revision_goals", "useful_resources"):
+                    w[key] = _pick_list(wb.get(key), list(default_w.get(key) or []))
+                merged_weeks.append(w)
+            if merged_weeks:
+                phase_out["weekly_breakdown"] = merged_weeks
+
+        merged_phases.append(phase_out)
+
+    if len(merged_phases) != 3:
+        return None
+
+    out["phases"] = merged_phases
+    return out
+
+
+async def build_roadmap_payload_ai(
+    career_goal: str,
+    skill_levels: Dict[str, Dict[str, Any]],
+) -> dict:
+    base = build_roadmap_payload(career_goal, skill_levels)
+    base.setdefault("career_summary", "")
+    base.setdefault("phase_personalization", {})
+    base.setdefault("recommendations", [])
+
+    def _debug_block(structure_source: str, personalization_source: str) -> None:
+        print("==================================", flush=True)
+        print(f"ROADMAP STRUCTURE: {structure_source}", flush=True)
+        print(f"AI PERSONALIZATION: {personalization_source}", flush=True)
+        print("==================================", flush=True)
+
+    def _normalize_personalization(raw: dict[str, Any] | None) -> Optional[dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return None
+
+        summary = raw.get("career_summary")
+        if summary is None:
+            summary = raw.get("careerSummary")
+        career_summary = summary.strip()[:1600] if isinstance(summary, str) else ""
+
+        pp = raw.get("phase_personalization")
+        if pp is None:
+            pp = raw.get("phasePersonalization")
+        phase_personalization: dict[str, str] = {}
+        if isinstance(pp, dict):
+            for phase_name in ("Foundation", "Practice", "Project"):
+                val = pp.get(phase_name)
+                if isinstance(val, str) and val.strip():
+                    phase_personalization[phase_name] = val.strip()[:700]
+
+        recs_raw = raw.get("recommendations")
+        if recs_raw is None:
+            recs_raw = raw.get("recommendation")
+            if isinstance(recs_raw, str) and recs_raw.strip():
+                recs_raw = [recs_raw]
+        recommendations: list[str] = []
+        if isinstance(recs_raw, list):
+            for item in recs_raw:
+                s = str(item).strip()
+                if s:
+                    recommendations.append(s[:220])
+                if len(recommendations) >= 5:
+                    break
+
+        if not career_summary and not phase_personalization and not recommendations:
+            return None
+
+        return {
+            "career_summary": career_summary,
+            "phase_personalization": phase_personalization,
+            "recommendations": recommendations,
+        }
+
+    def _merge_personalization(layer: dict[str, Any], source: str) -> dict:
+        out = copy.deepcopy(base)
+        out["generation_source"] = source
+        out["generated_at"] = datetime.now(timezone.utc).isoformat()
+        out["career_summary"] = layer.get("career_summary", "") or ""
+        out["phase_personalization"] = layer.get("phase_personalization", {}) or {}
+        out["recommendations"] = layer.get("recommendations", []) or []
+        # Keep existing roadmap structure; only enrich with per-phase guidance text.
+        phase_map = {str(p.get("name", "")): p for p in out.get("phases", []) if isinstance(p, dict)}
+        for phase_name, text in out["phase_personalization"].items():
+            if phase_name in phase_map and isinstance(text, str) and text.strip():
+                phase_map[phase_name]["description"] = text.strip()
+        return out
+
+    compact_skill_levels: dict[str, Any] = {}
+    for name, info in (skill_levels or {}).items():
+        if not isinstance(name, str) or not isinstance(info, dict):
+            continue
+        compact_skill_levels[name] = {"level": info.get("level"), "score": info.get("score")}
+
+    system_prompt = (
+        "Return only JSON with keys: career_summary, phase_personalization, recommendations. "
+        "phase_personalization must contain Foundation, Practice, Project. "
+        "recommendations must have 3-5 short strings. No other keys. "
+        "Do not generate roadmap phases, weeks, tasks, resources, or structure."
+    )
+    user_prompt = json.dumps(
+        {"career_goal": career_goal, "skill_levels": compact_skill_levels},
+        ensure_ascii=False,
+    )[:6000]
+
+    gemini_payload = await gemini_generate_json(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=0.35,
+        max_output_tokens=420,
+    )
+    gemini_layer = _normalize_personalization(gemini_payload)
+    if gemini_layer:
+        log_ai_provider("roadmap", "gemini")
+        _debug_block("HARDCODED", "GEMINI")
+        return _merge_personalization(gemini_layer, "gemini")
+
+    ollama_payload = await ollama_generate_json(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        timeout_seconds=10.0,
+    )
+    ollama_layer = _normalize_personalization(ollama_payload)
+    if ollama_layer:
+        log_ai_provider("roadmap", "ollama")
+        _debug_block("HARDCODED", "OLLAMA")
+        return _merge_personalization(ollama_layer, "ollama")
+
+    out = copy.deepcopy(base)
+    out["generation_source"] = "hardcoded"
+    out["career_summary"] = out.get("career_summary") or ""
+    out["phase_personalization"] = out.get("phase_personalization") or {}
+    out["recommendations"] = out.get("recommendations") or []
+    log_ai_provider("roadmap", "hardcoded")
+    _debug_block("FULLY HARDCODED", "FAILED")
+    return out

@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import mirror_roadmap_to_mongo, init_skillmap_in_mongo
 from app.db_sql import get_db
-from app.services.roadmap_agent import build_roadmap_payload
+from app.services.roadmap_agent import build_roadmap_payload_ai
 from app.sql_models import AssessmentResultRow, RoadmapRow, UserGoalSkills
 
 router = APIRouter(prefix="/roadmap", tags=["roadmap"])
@@ -28,7 +28,7 @@ async def generate_roadmap(user_id: str, session: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=400, detail="Complete and finalize the assessment first")
 
     skill_levels = res.skill_levels
-    payload = build_roadmap_payload(pref.career_goal, skill_levels)
+    payload = await build_roadmap_payload_ai(pref.career_goal, skill_levels)
 
     row = await session.get(RoadmapRow, user_id)
     if row:
